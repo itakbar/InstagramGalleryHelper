@@ -121,6 +121,9 @@ jobs:
           }
           EOF
 
+          mkdir -p app/src/main/res/drawable
+          cp instasave_icon.jpg app/src/main/res/drawable/instasave_icon.jpg
+
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -130,6 +133,7 @@ jobs:
                    android:name="com.chaquo.python.android.PyApplication"
                    android:allowBackup="false"
                    android:label="InstaSave"
+                   android:icon="@drawable/instasave_icon"
                    android:theme="@android:style/Theme.Material.Light.NoActionBar">
                    <activity
                       android:name=".MainActivity"
