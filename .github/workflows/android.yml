@@ -23,6 +23,11 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
       
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
@@ -70,6 +75,7 @@ jobs:
           plugins {
               id("com.android.application") version "8.7.3" apply false
               id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+              id("com.chaquo.python") version "17.2.0" apply false
           }
           EOF
 
@@ -77,6 +83,7 @@ jobs:
           plugins {
               id("com.android.application")
               id("org.jetbrains.kotlin.android")
+              id("com.chaquo.python")
           }
 
           android {
@@ -85,10 +92,13 @@ jobs:
 
               defaultConfig {
                   applicationId = "com.akbar.instagramgalleryhelper"
-                  minSdk = 23
+                  minSdk = 24
                   targetSdk = 35
                   versionCode = 1
                   versionName = "1.0"
+                  ndk {
+                    abiFilters += listOf("arm64-v8a")
+                  }
               }
 
               compileOptions {
@@ -100,15 +110,27 @@ jobs:
                   jvmTarget = "17"
               }
           }
+          chaquopy {
+             defaultConfig {
+                 version = "3.13"
+                 pip {
+                     install("yt-dlp")
+                 }
+             }
+          }
           EOF
 
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+
               <application
-                  android:allowBackup="false"
-                  android:label="Instagram Gallery Helper"
-                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
-                  <activity
+                   android:name="com.chaquo.python.android.PyApplication"
+                   android:allowBackup="false"
+                   android:label="InstaSave"
+                   android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                   <activity
                       android:name=".MainActivity"
                       android:exported="true">
                       <intent-filter>
@@ -120,23 +142,57 @@ jobs:
           </manifest>
           EOF
 
+          mkdir -p app/src/main/python
+
+          cat > app/src/main/python/downloader.py <<'EOF'
+          import os
+          import yt_dlp
+
+          def download_video(url, output_dir):
+              os.makedirs(output_dir, exist_ok=True)
+
+              options = {
+                  "format": "best[ext=mp4]/best",
+                  "outtmpl": os.path.join(
+                      output_dir,
+                      "%(title).80s-%(id)s.%(ext)s"
+                  ),
+                  "noplaylist": True,
+                  "quiet": True,
+                  "no_warnings": True,
+                  "retries": 2,
+                  "socket_timeout": 30,
+              }
+
+              with yt_dlp.YoutubeDL(options) as ydl:
+                  info = ydl.extract_info(url, download=True)
+                  return ydl.prepare_filename(info)
+          EOF
+
           cat > app/src/main/java/com/akbar/instagramgalleryhelper/MainActivity.kt <<'EOF'
           package com.akbar.instagramgalleryhelper
 
           import android.app.Activity
           import android.content.ContentValues
-          import android.content.Intent
           import android.net.Uri
           import android.os.Bundle
+          import android.os.Build
           import android.provider.MediaStore
-          import android.provider.OpenableColumns
           import android.view.Gravity
+          import android.view.ViewGroup
           import android.widget.Button
+          import android.widget.EditText
           import android.widget.LinearLayout
           import android.widget.TextView
+          import android.webkit.MimeTypeMap
+          import com.chaquo.python.Python
+          import java.io.File
 
           class MainActivity : Activity() {
+
               private lateinit var status: TextView
+              private lateinit var downloadButton: Button
+              private lateinit var urlInput: EditText
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
@@ -144,131 +200,172 @@ jobs:
                   val layout = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
                       gravity = Gravity.CENTER
-                      setPadding(32, 32, 32, 32)
+                      setPadding(32, 48, 32, 32)
                   }
 
                   val title = TextView(this).apply {
-                      text = "Instagram Gallery Helper"
-                      textSize = 22f
+                      text = "InstaSave"
+                      textSize = 30f
                       gravity = Gravity.CENTER
                   }
 
                   val description = TextView(this).apply {
-                      text = "Выбери скачанное видео. Приложение добавит его в Movies/Instagram, чтобы оно появилось в Галерее."
+                      text = "Скачивай видео и сохраняй их в Галерею"
                       textSize = 16f
                       gravity = Gravity.CENTER
-                      setPadding(0, 24, 0, 24)
+                      setPadding(0, 20, 0, 24)
                   }
 
-                  val chooseButton = Button(this).apply {
-                      text = "Выбрать видео"
-                      setOnClickListener { chooseVideo() }
+                  urlInput = EditText(this).apply {
+                      hint = "Вставь ссылку на Instagram"
+                      textSize = 15f
+                      singleLine = true
+                  }
+
+                  downloadButton = Button(this).apply {
+                      text = "Скачать видео"
+                      setOnClickListener {
+                          startDownload()
+                      }
                   }
 
                   status = TextView(this).apply {
-                      text = "Видео пока не выбрано."
-                      textSize = 14f
+                      text = "Готов к работе"
+                      textSize = 15f
                       gravity = Gravity.CENTER
                       setPadding(0, 24, 0, 0)
                   }
 
                   layout.addView(title)
                   layout.addView(description)
-                  layout.addView(chooseButton)
+                  layout.addView(
+                      urlInput,
+                      LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT
+                      )
+                  )
+                  layout.addView(downloadButton)
                   layout.addView(status)
+
                   setContentView(layout)
               }
 
-              private fun chooseVideo() {
-                  val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                      addCategory(Intent.CATEGORY_OPENABLE)
-                      type = "video/*"
+              private fun startDownload() {
+                  val url = urlInput.text.toString().trim()
+
+                  if (url.isEmpty()) {
+                      status.text = "Вставь ссылку на видео."
+                      return
                   }
-                  startActivityForResult(intent, PICK_VIDEO)
-              }
 
-              @Deprecated("Uses Android file picker")
-              override fun onActivityResult(
-                  requestCode: Int,
-                  resultCode: Int,
-                  data: Intent?
-              ) {
-                  super.onActivityResult(requestCode, resultCode, data)
+                  val host = try {
+                      Uri.parse(url).host?.lowercase() ?: ""
+                  } catch (e: Exception) {
+                      ""
+                  }
 
-                  if (requestCode != PICK_VIDEO || resultCode != RESULT_OK) return
+                  val validHost =
+                      host == "instagram.com" ||
+                      host.endsWith(".instagram.com") ||
+                      host == "instagr.am" ||
+                      host.endsWith(".instagr.am")
 
-                  val sourceUri = data?.data ?: return
-                  status.text = "Добавляю видео…"
+                  if (!url.startsWith("https://") || !validHost) {
+                      status.text = "Введи корректную ссылку Instagram."
+                      return
+                  }
+
+                  downloadButton.isEnabled = false
+                  status.text = "Подготавливаю загрузку..."
 
                   Thread {
                       try {
-                          val name = getDisplayName(sourceUri)
-                          val mime = contentResolver.getType(sourceUri) ?: "video/mp4"
+                          val outputDir = File(cacheDir, "downloads")
+                          outputDir.mkdirs()
 
-                          val values = ContentValues().apply {
-                              put(MediaStore.Video.Media.DISPLAY_NAME, name)
-                              put(MediaStore.Video.Media.MIME_TYPE, mime)
-                              put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/Instagram")
-                              put(MediaStore.Video.Media.IS_PENDING, 1)
+                          val python = Python.getInstance()
+                          val module = python.getModule("downloader")
+
+                          val result = module.callAttr(
+                              "download_video",
+                              url,
+                              outputDir.absolutePath
+                          )
+
+                          val downloadedFile = File(
+                              result.toJava(String::class.java)
+                          )
+
+                          if (!downloadedFile.exists() ||
+                              downloadedFile.length() == 0L) {
+                              throw Exception("Файл не найден или пуст.")
                           }
 
-                          val destination = contentResolver.insert(
-                              MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                              values
-                          ) ?: throw Exception("Не удалось создать файл")
-
-                          try {
-                              val input = contentResolver.openInputStream(sourceUri)
-                                  ?: throw Exception("Не удалось открыть видео")
-                              val output = contentResolver.openOutputStream(destination)
-                                  ?: throw Exception("Не удалось записать видео")
-
-                              input.use { source ->
-                                  output.use { target ->
-                                      source.copyTo(target)
-                                  }
-                              }
-
-                              val publish = ContentValues().apply {
-                                  put(MediaStore.Video.Media.IS_PENDING, 0)
-                              }
-                              contentResolver.update(destination, publish, null, null)
-
-                          } catch (error: Exception) {
-                              contentResolver.delete(destination, null, null)
-                              throw error
-                          }
+                          saveToGallery(downloadedFile)
 
                           runOnUiThread {
-                              status.text = "Готово! Видео добавлено в Movies/Instagram."
+                              status.text = "Готово! Видео сохранено в Галерею."
+                              downloadButton.isEnabled = true
                           }
 
-                      } catch (error: Exception) {
+                      } catch (e: Exception) {
                           runOnUiThread {
-                              status.text = "Ошибка: ${error.message}"
+                              status.text = "Ошибка: ${e.message}"
+                              downloadButton.isEnabled = true
                           }
                       }
                   }.start()
               }
 
-              private fun getDisplayName(uri: Uri): String {
-                  var result = "Instagram_video.mp4"
+              private fun saveToGallery(file: File) {
+                  val extension = file.extension.lowercase()
+                  val mime = MimeTypeMap.getSingleton()
+                      .getMimeTypeFromExtension(extension) ?: "video/mp4"
 
-                  contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-                      val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                      if (index >= 0 && cursor.moveToFirst()) {
-                          result = cursor.getString(index) ?: result
+                  val values = ContentValues().apply {
+                      put(MediaStore.Video.Media.DISPLAY_NAME, file.name)
+                      put(MediaStore.Video.Media.MIME_TYPE, mime)
+
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                          put(
+                              MediaStore.Video.Media.RELATIVE_PATH,
+                              "Movies/InstaSave"
+                          )
+                          put(MediaStore.Video.Media.IS_PENDING, 1)
                       }
                   }
 
-                  return result
-              }
+                  val destination = contentResolver.insert(
+                      MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                      values
+                  ) ?: throw Exception("Не удалось создать файл в Галерее.")
 
-              companion object {
-                  private const val PICK_VIDEO = 1001
+                  try {
+                      val output = contentResolver.openOutputStream(destination)
+                          ?: throw Exception("Не удалось записать видео.")
+
+                      output.use { target ->
+                          file.inputStream().use { source ->
+                              source.copyTo(target)
+                          }
+                      }
+
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                          val publish = ContentValues().apply {
+                              put(MediaStore.Video.Media.IS_PENDING, 0)
+                          }
+                          contentResolver.update(destination, publish, null, null)
+                      }
+
+                  } catch (e: Exception) {
+                      contentResolver.delete(destination, null, null)
+                      throw e
+                  }
               }
           }
           EOF
+
 
       - name: Build APK
         run: gradle --no-daemon assembleDebug
