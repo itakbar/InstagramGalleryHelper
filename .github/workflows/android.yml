@@ -1,3 +1,4 @@
+
 name: Build Instagram Gallery Helper APK
 
 on:
@@ -219,7 +220,7 @@ jobs:
                   urlInput = EditText(this).apply {
                       hint = "Вставь ссылку на Instagram"
                       textSize = 15f
-                      singleLine = true
+                      isSingleLine = true
                   }
 
                   downloadButton = Button(this).apply {
